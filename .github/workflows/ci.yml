@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: detect-changes
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.filter.outputs.package }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'push'
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            package:
+              - ".github/workflows/*.yml"
+              - "support_requests/**"
+              - "tests/**"
+              - "pyproject.toml"
+              - "tox.ini"
+              - "uv.lock"
+
+  static-analysis:
+    name: static-analysis
+    needs: detect-changes
+    if: needs.detect-changes.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Lint
+        run: uv run tox -e lint
+
+      - name: Type-check
+        run: uv run tox -e mypy
+
+      - name: Security checks
+        run: uv run tox -e security
+
+  lint:
+    name: lint
+    needs: [detect-changes, static-analysis]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify lint result
+        run: |
+          if [ "${{ needs.detect-changes.outputs.package }}" != "true" ]; then
+            echo "No package changes detected; lint is not required."
+            exit 0
+          fi
+          if [ "${{ needs.static-analysis.result }}" != "success" ]; then
+            echo "::error::static-analysis concluded '${{ needs.static-analysis.result }}'"
+            exit 1
+          fi
+
+  type-check:
+    name: type-check
+    needs: [detect-changes, static-analysis]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify type-check result
+        run: |
+          if [ "${{ needs.detect-changes.outputs.package }}" != "true" ]; then
+            echo "No package changes detected; type-check is not required."
+            exit 0
+          fi
+          if [ "${{ needs.static-analysis.result }}" != "success" ]; then
+            echo "::error::static-analysis concluded '${{ needs.static-analysis.result }}'"
+            exit 1
+          fi
+
+  security:
+    name: security
+    needs: [detect-changes, static-analysis]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify security result
+        run: |
+          if [ "${{ needs.detect-changes.outputs.package }}" != "true" ]; then
+            echo "No package changes detected; security checks are not required."
+            exit 0
+          fi
+          if [ "${{ needs.static-analysis.result }}" != "success" ]; then
+            echo "::error::static-analysis concluded '${{ needs.static-analysis.result }}'"
+            exit 1
+          fi
+
+  test-suite:
+    name: test-suite
+    needs: [detect-changes, static-analysis]
+    if: needs.detect-changes.outputs.package == 'true' && needs.static-analysis.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Tests
+        run: uv run tox -e py313
+
+  test:
+    name: test
+    needs: [detect-changes, test-suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify test result
+        run: |
+          if [ "${{ needs.detect-changes.outputs.package }}" != "true" ]; then
+            echo "No package changes detected; tests are not required."
+            exit 0
+          fi
+          if [ "${{ needs.test-suite.result }}" != "success" ]; then
+            echo "::error::test-suite concluded '${{ needs.test-suite.result }}'"
+            exit 1
+          fi

@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-support-requests"
+version = "0.1.0"
+description = "Reusable Django app for local support requests, attachments, and admin-managed issue escalation."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+authors = [
+    { name = "Bjorn" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Django",
+    "Framework :: Django :: 5.1",
+    "Framework :: Django :: 5.2",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "Django>=5.1,<6",
+    "djangorestframework>=3.15",
+    "httpx[http2]>=0.28,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bandit>=1.8",
+    "build>=1.2",
+    "django-stubs",
+    "djangorestframework-stubs",
+    "mypy>=1.11",
+    "pip-audit>=2.9",
+    "pytest>=8.0",
+    "pytest-django>=4.8",
+    "ruff>=0.6",
+    "tox>=4.28",
+    "tox-uv",
+]
+
+[tool.setuptools.packages.find]
+include = ["support_requests*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+support_requests = ["py.typed", "templates/**/*.html"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.mypy]
+plugins = ["mypy_django_plugin.main"]
+python_version = "3.13"
+exclude = ["^support_requests/migrations/"]
+show_error_codes = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "DJ"]
+
+[tool.ruff.lint.per-file-ignores]
+"*/migrations/*.py" = ["E501", "I001"]

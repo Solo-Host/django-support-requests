@@ -1,0 +1,2 @@
+include support_requests/py.typed
+recursive-include support_requests/templates *.html

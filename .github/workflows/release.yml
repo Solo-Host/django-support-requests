@@ -1,0 +1,407 @@
+name: Release
+
+# Manual release entrypoint for package releases.
+#
+# Required secrets:
+#   - RELEASE_APP_PRIVATE_KEY    GitHub App private key for opening release PRs.
+# Required variables:
+#   - RELEASE_APP_ID             GitHub App ID for opening release PRs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: Version bump type
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: Specific version override (X.Y.Z). Leave empty to auto-bump.
+        required: false
+        type: string
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  create-release-pr:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_ID || secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Determine version
+        id: version
+        run: |
+          set -euo pipefail
+
+          CURRENT=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          PACKAGE_CURRENT=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' support_requests/__init__.py)
+          LOCK_CURRENT="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          text = Path("uv.lock").read_text()
+          match = re.search(
+              r'\[\[package\]\]\nname = "django-support-requests"\nversion = "([^"]+)"\nsource = \{ editable = "\." \}',
+              text,
+          )
+          print(match.group(1) if match else "")
+          PY
+          )"
+          if [ -z "${CURRENT}" ] || ! echo "${CURRENT}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not read a valid version from pyproject.toml (got '${CURRENT}')"
+            exit 1
+          fi
+          if [ -z "${PACKAGE_CURRENT}" ] || ! echo "${PACKAGE_CURRENT}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not read a valid version from support_requests/__init__.py (got '${PACKAGE_CURRENT}')"
+            exit 1
+          fi
+          if [ -z "${LOCK_CURRENT}" ] || ! echo "${LOCK_CURRENT}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not read a valid version from uv.lock (got '${LOCK_CURRENT}')"
+            exit 1
+          fi
+          if [ "${CURRENT}" != "${PACKAGE_CURRENT}" ] || [ "${CURRENT}" != "${LOCK_CURRENT}" ]; then
+            echo "::error::Version drift detected on main: pyproject.toml=${CURRENT}, support_requests/__init__.py=${PACKAGE_CURRENT}, uv.lock=${LOCK_CURRENT}"
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          LATEST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
+          LATEST_VERSION="${LATEST_TAG#v}"
+
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+            if ! echo "${VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Invalid version format '${VERSION}'. Expected: X.Y.Z"
+              exit 1
+            fi
+          else
+            BASE_VERSION="${CURRENT}"
+            if [ -n "${LATEST_TAG}" ]; then
+              HIGHEST_VERSION="$(printf '%s\n%s\n' "${CURRENT}" "${LATEST_VERSION}" | sort -V | tail -n1)"
+              if [ "${HIGHEST_VERSION}" = "${LATEST_VERSION}" ]; then
+                BASE_VERSION="${LATEST_VERSION}"
+              fi
+            fi
+
+            MAJOR="${BASE_VERSION%%.*}"
+            REST="${BASE_VERSION#*.}"
+            MINOR="${REST%%.*}"
+            PATCH="${REST##*.}"
+
+            case "${{ inputs.bump_type }}" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "Resolved package release PR version '${VERSION}' from main (pyproject=${CURRENT}${LATEST_TAG:+, latest_tag=${LATEST_TAG}})"
+
+          {
+            echo "version=${VERSION}"
+            echo "branch=release-bump/v${VERSION}"
+            echo "tag=v${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release state
+        id: state
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ steps.version.outputs.branch }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists"
+            exit 1
+          fi
+
+          EXISTING_PR="$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --head "${BRANCH}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number' 2>/dev/null || true)"
+
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "existing_pr_number=${EXISTING_PR}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git ls-remote --exit-code origin "refs/heads/${BRANCH}" >/dev/null 2>&1; then
+            echo "::error::Branch ${BRANCH} already exists without an open PR"
+            exit 1
+          fi
+
+      - name: Configure git
+        if: steps.state.outputs.existing_pr_number == ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create release bump branch
+        if: steps.state.outputs.existing_pr_number == ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          git checkout -b "${BRANCH}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
+          sed -i "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"/" support_requests/__init__.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+          path = Path("uv.lock")
+          text = path.read_text()
+          updated, count = re.subn(
+              r'(\[\[package\]\]\nname = "django-support-requests"\nversion = )"[^"]+"(\nsource = \{ editable = "\." \})',
+              lambda match: f'{match.group(1)}"{version}"{match.group(2)}',
+              text,
+              count=1,
+          )
+          if count != 1:
+              print("::error::Could not update django-support-requests version in uv.lock")
+              sys.exit(1)
+          path.write_text(updated)
+          PY
+
+          LOCK_CURRENT="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          text = Path("uv.lock").read_text()
+          match = re.search(
+              r'\[\[package\]\]\nname = "django-support-requests"\nversion = "([^"]+)"\nsource = \{ editable = "\." \}',
+              text,
+          )
+          print(match.group(1) if match else "")
+          PY
+          )"
+          if [ "${LOCK_CURRENT}" != "${VERSION}" ]; then
+            echo "::error::uv.lock version ${LOCK_CURRENT} does not match release branch version ${VERSION}"
+            exit 1
+          fi
+
+          PACKAGE_CURRENT="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' support_requests/__init__.py)"
+          if [ "${PACKAGE_CURRENT}" != "${VERSION}" ]; then
+            echo "::error::support_requests/__init__.py version ${PACKAGE_CURRENT} does not match release branch version ${VERSION}"
+            exit 1
+          fi
+
+          git add pyproject.toml support_requests/__init__.py uv.lock
+
+          if git diff --cached --quiet; then
+            echo "::error::Version ${VERSION} is already present on main; refusing to create an empty release PR"
+            exit 1
+          fi
+
+          git commit -m "chore: bump version to ${VERSION}"
+          git push origin "${BRANCH}"
+
+      - name: Create release PR
+        if: steps.state.outputs.existing_pr_number == ''
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="${{ steps.version.outputs.branch }}"
+          PR_BODY=$(cat <<EOF
+          ## Release v${VERSION}
+
+          This PR was created by the release workflow.
+
+          ### On merge
+          - release.yml will create or reuse tag \`v${VERSION}\`
+          - release.yml will build the sdist and wheel artifacts
+          - release.yml will create or update the GitHub Release
+          EOF
+          )
+
+          PR_URL="$(gh pr create \
+            --repo "${{ github.repository }}" \
+            --base main \
+            --head "${BRANCH}" \
+            --title "release: v${VERSION}" \
+            --body "${PR_BODY}" | tail -n1)"
+
+          echo "number=${PR_URL##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge for release PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.state.outputs.existing_pr_number || steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          ATTEMPTS=4
+          SLEEP_SECONDS=10
+
+          for attempt in $(seq 1 "${ATTEMPTS}"); do
+            set +e
+            OUTPUT="$(gh pr merge "${PR_NUMBER}" \
+              --repo "${{ github.repository }}" \
+              --squash \
+              --auto \
+              --delete-branch 2>&1)"
+            STATUS=$?
+            set -e
+
+            if [ "${STATUS}" -eq 0 ]; then
+              echo "::notice::Enabled auto-merge and branch deletion for release PR #${PR_NUMBER}"
+              exit 0
+            fi
+
+            if printf '%s' "${OUTPUT}" | grep -q 'Pull request is in clean status' && [ "${attempt}" -lt "${ATTEMPTS}" ]; then
+              echo "Attempt ${attempt}/${ATTEMPTS}: release PR #${PR_NUMBER} is still reporting clean status before checks register; retrying in ${SLEEP_SECONDS}s..."
+              sleep "${SLEEP_SECONDS}"
+              continue
+            fi
+
+            if printf '%s' "${OUTPUT}" | grep -q 'Pull request is in clean status'; then
+              echo "::warning::Release PR #${PR_NUMBER} was created successfully, but auto-merge could not be enabled before checks registered"
+              exit 0
+            fi
+
+            printf '%s\n' "${OUTPUT}"
+            exit "${STATUS}"
+          done
+
+  release-metadata:
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release-bump/v')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Extract version from branch name
+        id: version
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          VERSION="${BRANCH#release-bump/v}"
+
+          if ! echo "${VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not extract valid version from branch '${BRANCH}'"
+            exit 1
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=v${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish-release:
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release-bump/v')
+    needs: release-metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --force --tags origin
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build frontend
+        run: python -m pip install --upgrade pip build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create release tag if needed
+        env:
+          TAG: ${{ needs.release-metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          HEAD_SHA="$(git rev-parse HEAD)"
+
+          if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-list -n 1 "${TAG}")"
+            if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
+              echo "::error::Tag ${TAG} already exists but points to ${TAG_SHA} instead of ${HEAD_SHA}"
+              exit 1
+            fi
+
+            echo "::notice::Tag ${TAG} already exists on the target commit"
+          else
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+          fi
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* \
+              --repo "${{ github.repository }}" \
+              --clobber
+          else
+            gh release create "${TAG}" dist/* \
+              --repo "${{ github.repository }}" \
+              --title "${TAG}" \
+              --generate-notes
+          fi
