@@ -62,13 +62,18 @@ class SupportProviderConfigAdminForm(forms.ModelForm):
             "slug",
             "name",
             "backend_key",
+            "auth_mode",
             "base_url",
             "api_token",
+            "github_app_id",
+            "github_installation_id",
+            "github_private_key",
             "configuration",
             "is_active",
         )
         widgets = {
             "api_token": forms.PasswordInput(render_value=True),
+            "github_private_key": forms.Textarea(attrs={"rows": 12}),
         }
 
 
@@ -252,6 +257,50 @@ class SupportProviderConfigAdmin(admin.ModelAdmin):
     list_display = ("name", "slug", "backend_key", "is_active", "created_at")
     list_filter = ("backend_key", "is_active")
     search_fields = ("name", "slug", "backend_key")
+    fieldsets = (
+        (
+            "Provider basics",
+            {
+                "fields": ("name", "slug", "backend_key", "is_active", "base_url"),
+                "description": (
+                    "Use the GitHub backend with GitHub App authentication whenever possible. "
+                    "Leave base_url blank for github.com, or set it to the GitHub Enterprise "
+                    "API root."
+                ),
+            },
+        ),
+        (
+            "GitHub App authentication (preferred)",
+            {
+                "fields": (
+                    "auth_mode",
+                    "github_app_id",
+                    "github_installation_id",
+                    "github_private_key",
+                ),
+                "description": (
+                    "For GitHub, select GitHub App auth and paste the App ID, installation ID, "
+                    "and PEM private key from the installed GitHub App."
+                ),
+            },
+        ),
+        (
+            "Legacy token fallback",
+            {
+                "fields": ("api_token",),
+                "description": (
+                    "Use only when you intentionally need a personal access token or pre-minted "
+                    "API token instead of GitHub App authentication."
+                ),
+            },
+        ),
+        (
+            "Advanced configuration",
+            {
+                "fields": ("configuration",),
+            },
+        ),
+    )
 
 
 @admin.register(SupportDestination)

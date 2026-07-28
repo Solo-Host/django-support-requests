@@ -143,11 +143,23 @@ class SupportRequestAttachment(TimeStampedUUIDModel):
 
 
 class SupportProviderConfig(TimeStampedUUIDModel):
+    class AuthMode(models.TextChoices):
+        API_TOKEN = "api_token", "API token"
+        GITHUB_APP = "github_app", "GitHub App"
+
     slug = models.SlugField(max_length=80, unique=True)
     name = models.CharField(max_length=120)
     backend_key = models.CharField(max_length=50)
+    auth_mode = models.CharField(
+        max_length=32,
+        choices=AuthMode.choices,
+        default=AuthMode.GITHUB_APP,
+    )
     base_url = models.URLField(blank=True, default="")
     api_token = models.CharField(max_length=255, blank=True, default="")
+    github_app_id = models.CharField(max_length=64, blank=True, default="")
+    github_installation_id = models.CharField(max_length=64, blank=True, default="")
+    github_private_key = models.TextField(blank=True, default="")
     configuration = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
 
