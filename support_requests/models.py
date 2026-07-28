@@ -2,15 +2,30 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
+from django.utils.text import slugify
 
 
 def support_request_attachment_upload_to(instance: models.Model, filename: str) -> str:
     suffix = Path(filename).suffix or ".bin"
     request_id = getattr(instance, "request_id", "request")
     return f"support-requests/attachments/{request_id}/{uuid.uuid4().hex}{suffix}"
+
+
+def _generated_slug(model: type[models.Model], *, value: str, instance_id: object | None) -> str:
+    base_slug = slugify(value).strip("-") or "item"
+    candidate = base_slug[:80]
+    suffix_index = 2
+    while model._default_manager.filter(slug=candidate).exclude(pk=instance_id).exists():
+        suffix = f"-{suffix_index}"
+        candidate = f"{base_slug[: max(1, 80 - len(suffix))]}{suffix}"
+        suffix_index += 1
+    return candidate
 
 
 class TimeStampedUUIDModel(models.Model):
@@ -94,12 +109,21 @@ class SupportMessage(TimeStampedUUIDModel):
     )
     body = models.TextField()
     is_internal = models.BooleanField(default=False)
+    external_message_id = models.CharField(max_length=120, blank=True, default="")
 
     class Meta:
         db_table = "support_requests_message"
         ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("request", "external_message_id"),
+                condition=~Q(external_message_id=""),
+                name="support_requests_message_external_message_unique",
+            )
+        ]
         indexes = [
             models.Index(fields=["request", "created_at"]),
+            models.Index(fields=["external_message_id"]),
         ]
 
     def __str__(self) -> str:
@@ -147,7 +171,7 @@ class SupportProviderConfig(TimeStampedUUIDModel):
         API_TOKEN = "api_token", "API token"
         GITHUB_APP = "github_app", "GitHub App"
 
-    slug = models.SlugField(max_length=80, unique=True)
+    slug = models.SlugField(max_length=80, unique=True, blank=True)
     name = models.CharField(max_length=120)
     backend_key = models.CharField(max_length=50)
     auth_mode = models.CharField(
@@ -160,15 +184,61 @@ class SupportProviderConfig(TimeStampedUUIDModel):
     github_app_id = models.CharField(max_length=64, blank=True, default="")
     github_installation_id = models.CharField(max_length=64, blank=True, default="")
     github_private_key = models.TextField(blank=True, default="")
+    github_webhook_secret = models.CharField(max_length=255, blank=True, default="")
     configuration = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:
         db_table = "support_requests_provider_config"
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("github_installation_id",),
+                condition=~Q(github_installation_id=""),
+                name="support_requests_provider_github_installation_unique",
+            )
+        ]
 
     def __str__(self) -> str:
         return self.name
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if not self.slug:
+            self.slug = _generated_slug(
+                type(self),
+                value=self.name,
+                instance_id=self.pk,
+            )
+        super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        super().clean()
+        if self.backend_key != "github":
+            return
+        if self.auth_mode == self.AuthMode.GITHUB_APP:
+            missing_fields = []
+            if not str(self.github_app_id or "").strip():
+                missing_fields.append("github_app_id")
+            if not str(self.github_installation_id or "").strip():
+                missing_fields.append("github_installation_id")
+            if not str(self.github_private_key or "").strip():
+                missing_fields.append("github_private_key")
+            if not str(self.github_webhook_secret or "").strip():
+                missing_fields.append("github_webhook_secret")
+            if missing_fields:
+                raise ValidationError(
+                    {
+                        field_name: "This field is required when using GitHub App authentication."
+                        for field_name in missing_fields
+                    }
+                )
+            return
+        if not str(self.api_token or "").strip():
+            raise ValidationError(
+                {  # nosec B105 - validation text for a config field, not a credential
+                    "api_token": "This field is required when using API token authentication."
+                }
+            )
 
 
 class SupportDestination(TimeStampedUUIDModel):
@@ -177,7 +247,7 @@ class SupportDestination(TimeStampedUUIDModel):
         on_delete=models.CASCADE,
         related_name="destinations",
     )
-    slug = models.SlugField(max_length=80, unique=True)
+    slug = models.SlugField(max_length=80, unique=True, blank=True)
     name = models.CharField(max_length=120)
     remote_project = models.CharField(max_length=255)
     default_labels = models.JSONField(default=list, blank=True)
@@ -193,6 +263,19 @@ class SupportDestination(TimeStampedUUIDModel):
 
     def __str__(self) -> str:
         return self.name
+
+    def save(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        if not self.slug:
+            self.slug = _generated_slug(
+                type(self),
+                value=self.name,
+                instance_id=self.pk,
+            )
+        super().save(*args, **kwargs)
 
 
 class SupportEscalation(TimeStampedUUIDModel):
@@ -230,6 +313,13 @@ class SupportEscalation(TimeStampedUUIDModel):
     class Meta:
         db_table = "support_requests_escalation"
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("request",),
+                condition=Q(status="opened"),
+                name="support_requests_one_open_escalation_per_request",
+            )
+        ]
         indexes = [
             models.Index(fields=["request", "created_at"]),
             models.Index(fields=["destination", "created_at"]),

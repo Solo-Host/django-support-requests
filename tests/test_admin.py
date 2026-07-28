@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 from django.contrib.admin.sites import AdminSite
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 from django.urls import reverse
 
 from support_requests.admin import SupportRequestAdmin
@@ -32,6 +32,20 @@ def test_support_request_admin_exposes_open_issue_link() -> None:
     assert (
         reverse("admin:support_requests_supportrequest_open_issue", args=[support_request.pk])
         in link
+    )
+
+
+def test_support_request_admin_hides_open_issue_link_for_unsaved_request() -> None:
+    admin = SupportRequestAdmin(SupportRequest, AdminSite())
+    request_factory = RequestFactory()
+    request = SupportRequest(subject="", body="")
+
+    assert "open_issue_link" not in admin.get_readonly_fields(
+        request_factory.get("/admin/support_requests/supportrequest/add/"),
+        None,
+    )
+    assert "Save a requester, subject, and body before opening a remote issue." in str(
+        admin.open_issue_link(request)
     )
 
 
@@ -73,3 +87,24 @@ def test_support_request_admin_open_issue_view_creates_escalation(client: Any) -
 
     assert response.status_code == 302
     assert SupportEscalation.objects.filter(request=support_request).count() == 1
+
+
+def test_support_request_admin_open_issue_view_rejects_invalid_request(client: Any) -> None:
+    staff_user = create_user(
+        email="staff@example.com",
+        is_staff=True,
+        is_superuser=True,
+    )
+    support_request = SupportRequest.objects.create(
+        requester=create_user(email="user@example.com"),
+        subject=" ",
+        body=" ",
+    )
+    client.force_login(staff_user)
+
+    response = client.get(
+        reverse("admin:support_requests_supportrequest_open_issue", args=[support_request.pk]),
+    )
+
+    assert response.status_code == 302
+    assert SupportEscalation.objects.filter(request=support_request).count() == 0

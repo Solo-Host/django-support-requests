@@ -11,6 +11,7 @@ from support_requests.models import SupportProviderConfig
 from support_requests.providers.base import (
     BaseSupportProvider,
     SupportAttachmentLink,
+    SupportCommentResult,
     SupportIssueResult,
 )
 
@@ -62,6 +63,42 @@ class GitHubSupportProvider(BaseSupportProvider):
             remote_issue_id=str(data.get("id", "")),
             remote_issue_number=str(data.get("number", "")),
             remote_issue_url=str(data.get("html_url", "")),
+            provider_response=data,
+        )
+
+    def add_comment(
+        self,
+        *,
+        provider_config: SupportProviderConfig,
+        destination: Any,
+        escalation: Any,
+        message: Any,
+    ) -> SupportCommentResult:
+        remote_project = str(destination.remote_project).strip()
+        issue_number = str(escalation.remote_issue_number).strip()
+        if not remote_project or not issue_number:
+            msg = "The remote issue is missing repository or issue number details."
+            raise ValueError(msg)
+
+        base_url = str(provider_config.base_url or self.default_base_url).rstrip("/")
+        token = self._resolve_access_token(provider_config=provider_config, base_url=base_url)
+        comment_url = f"{base_url}/repos/{remote_project}/issues/{issue_number}/comments"
+        response = httpx.post(
+            comment_url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "django-support-requests",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"body": str(message.body).strip()},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return SupportCommentResult(
+            remote_comment_id=str(data.get("id", "")),
+            remote_comment_url=str(data.get("html_url", "")),
             provider_response=data,
         )
 

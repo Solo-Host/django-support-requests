@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 from rest_framework import status, viewsets
@@ -9,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from support_requests.models import SupportRequest
 from support_requests.serializers import (
@@ -20,6 +22,9 @@ from support_requests.serializers import (
 )
 from support_requests.services import (
     create_request_attachment,
+    github_provider_for_webhook,
+    github_webhook_signature_is_valid,
+    handle_github_webhook,
     list_visible_messages,
 )
 
@@ -81,3 +86,51 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
             SupportRequestAttachmentSerializer(attachment).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class GitHubWebhookView(APIView):
+    authentication_classes: list[type[Any]] = []
+    permission_classes: list[type[Any]] = []
+
+    def post(self, request: Request) -> Response:
+        raw_body = request._request.body
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return Response(
+                {"detail": "GitHub webhook payload must be a JSON object."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(payload, dict):
+            return Response(
+                {"detail": "GitHub webhook payload must be a JSON object."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        payload = cast(dict[str, Any], payload)
+        provider_config = github_provider_for_webhook(payload)
+        if provider_config is None:
+            return Response(
+                {"status": "ignored", "reason": "Unknown GitHub installation."},
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        signature_header = request.headers.get("X-Hub-Signature-256", "")
+        if not github_webhook_signature_is_valid(
+            raw_body=raw_body,
+            signature_header=signature_header,
+            provider_config=provider_config,
+        ):
+            return Response(
+                {"detail": "Invalid GitHub webhook signature."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        event_payload = {
+            **payload,
+            "_event_name": request.headers.get("X-GitHub-Event", ""),
+        }
+        result = handle_github_webhook(
+            provider_config=provider_config,
+            payload=event_payload,
+        )
+        return Response(result)

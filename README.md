@@ -11,6 +11,7 @@ admin-managed escalation to external issue platforms.
 - pluggable outbound provider layer with GitHub included first
 - multiple configured providers and multiple configured remote destinations
 - Django admin workflow for reviewing a request and opening a remote issue
+- GitHub App webhook sync for remote support replies and issue state changes
 - optional DRF URL set for request, message, and attachment APIs
 - host hook for exposing extra attachment sources during escalation
 
@@ -113,7 +114,10 @@ file=<updated-screenshot.png>
 ```
 
 The package keeps the support request local as the system of record. Remote
-platform issues are created later by staff from Django admin.
+platform issues are created later by staff from Django admin. Once a request has
+been escalated, new local user replies are forwarded to the remote issue, and
+GitHub App webhooks can sync remote support replies back into the local message
+thread.
 
 ## Configuration
 
@@ -143,6 +147,12 @@ SUPPORT_REQUESTS_EXTRA_ATTACHMENT_PROVIDERS = [
 This is useful when the host project keeps certain attachment flows outside the
 package, such as diagnostics log archives.
 
+### Auto-generated slugs
+
+`SupportProviderConfig.slug` and `SupportDestination.slug` are generated
+automatically from the `name` field. Django admin does not require operators to
+enter them manually.
+
 ### Attachment limits
 
 ```python
@@ -167,8 +177,17 @@ In GitHub:
 3. Under **Repository permissions**, grant:
    - **Issues: Read and write**
    - **Metadata: Read-only**
-4. Webhooks are **not required** for simple issue creation.
-5. Generate a **private key** for the app and download the PEM file.
+4. Generate a **webhook secret** for the app.
+5. Set the webhook URL to your mounted support requests webhook endpoint:
+
+   ```text
+   https://<your-host>/api/v1/support/webhooks/github/
+   ```
+
+6. Subscribe to:
+   - **Issue comments**
+   - **Issues**
+7. Generate a **private key** for the app and download the PEM file.
 
 ### 2. Install the app on the target repositories
 
@@ -191,6 +210,7 @@ Create a `SupportProviderConfig` record in Django admin with:
 | `github_app_id` | the App ID from the GitHub App settings page |
 | `github_installation_id` | the installation ID that can access the target repos |
 | `github_private_key` | the full PEM private key contents |
+| `github_webhook_secret` | the GitHub App webhook secret |
 | `api_token` | leave blank when using GitHub App auth |
 
 The GitHub provider will:
@@ -198,6 +218,7 @@ The GitHub provider will:
 1. sign a short-lived app JWT with the private key
 2. exchange that JWT for an installation access token
 3. use the installation token to create the issue in the configured repo
+4. verify inbound GitHub webhook deliveries with the webhook secret
 
 ### 4. Configure one destination per repo
 
@@ -207,7 +228,6 @@ Create a `SupportDestination` row for each repo that staff may escalate into:
 | --- | --- |
 | `provider` | `GitHub production support` |
 | `name` | `Aspenroute backend issues` |
-| `slug` | `aspenroute-backend` |
 | `remote_project` | `Solo-Host/aspenroute-backend` |
 | `default_labels` | `["support", "triage"]` |
 
@@ -224,6 +244,16 @@ repos, create multiple destination rows.
 
 For GitHub, attachments are forwarded as links in the issue body because the
 official GitHub issue API does not accept direct binary uploads.
+
+### 6. What webhook sync does
+
+With the GitHub App webhook configured:
+
+- `issue_comment.created` syncs remote support replies into the local support
+  request message thread
+- `issues.closed` marks the local request as resolved
+- `issues.reopened` reopens the local request
+- new local user replies are posted back to the linked GitHub issue as comments
 
 ### Optional fallback: personal access token
 
