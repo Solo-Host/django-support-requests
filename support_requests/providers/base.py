@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from support_requests.models import SupportDestination, SupportProviderConfig, SupportRequest
+    from support_requests.models import (
+        SupportDestination,
+        SupportEscalation,
+        SupportMessage,
+        SupportProviderConfig,
+        SupportRequest,
+    )
 
 
 @dataclass(frozen=True)
@@ -26,6 +32,13 @@ class SupportIssueResult:
     provider_response: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class SupportCommentResult:
+    remote_comment_id: str
+    remote_comment_url: str
+    provider_response: dict[str, Any]
+
+
 class BaseSupportProvider(ABC):
     backend_key: str
 
@@ -38,4 +51,15 @@ class BaseSupportProvider(ABC):
         request: SupportRequest,
         attachments: list[SupportAttachmentLink],
     ) -> SupportIssueResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_comment(
+        self,
+        *,
+        provider_config: SupportProviderConfig,
+        destination: SupportDestination,
+        escalation: SupportEscalation,
+        message: SupportMessage,
+    ) -> SupportCommentResult:
         raise NotImplementedError

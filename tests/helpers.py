@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from support_requests.providers.base import (
     BaseSupportProvider,
     SupportAttachmentLink,
+    SupportCommentResult,
     SupportIssueResult,
 )
 
@@ -55,4 +56,19 @@ class DummySupportProvider(BaseSupportProvider):
             provider_response={
                 "attachments": [attachment.display_name for attachment in attachments],
             },
+        )
+
+    def add_comment(
+        self,
+        *,
+        provider_config: Any,
+        destination: Any,
+        escalation: Any,
+        message: Any,
+    ) -> SupportCommentResult:
+        del provider_config, destination, escalation
+        return SupportCommentResult(
+            remote_comment_id=f"comment-{message.id}",
+            remote_comment_url="https://example.com/comment/1",
+            provider_response={"body": message.body},
         )
