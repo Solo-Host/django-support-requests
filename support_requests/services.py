@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
 from django.core.files.uploadedfile import UploadedFile
+from django.db import connection
 from django.utils import timezone
 from django.utils.module_loading import import_string
 from rest_framework import serializers
@@ -243,7 +245,9 @@ def escalate_support_request(
             status=SupportEscalation.Status.FAILED,
             title_snapshot=request.subject,
             body_snapshot=request.body,
-            forwarded_attachments=[attachment.__dict__ for attachment in attachments],
+            forwarded_attachments=_json_storage_safe(
+                [attachment.__dict__ for attachment in attachments]
+            ),
             failure_message=str(exc),
         )
         append_request_message(
@@ -266,8 +270,10 @@ def escalate_support_request(
         remote_issue_url=result.remote_issue_url,
         title_snapshot=request.subject,
         body_snapshot=request.body,
-        forwarded_attachments=[attachment.__dict__ for attachment in attachments],
-        provider_response=result.provider_response,
+        forwarded_attachments=_json_storage_safe(
+            [attachment.__dict__ for attachment in attachments]
+        ),
+        provider_response=_json_storage_safe(result.provider_response),
     )
     request.last_escalated_at = timezone.now()
     request.status = SupportRequest.Status.PENDING
@@ -437,6 +443,64 @@ def _request_needs_opening_message_entry(
             return False
 
     return True
+
+
+def _json_storage_safe(value: Any) -> Any:
+    if not _database_uses_sql_ascii():
+        return value
+
+    if isinstance(value, dict):
+        return {
+            _ascii_safe_string(str(key)): _json_storage_safe(item_value)
+            for key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_json_storage_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_storage_safe(item) for item in value]
+    if isinstance(value, str):
+        return _ascii_safe_string(value)
+    return value
+
+
+def _ascii_safe_string(value: str) -> str:
+    replacements = {
+        "\u00b7": " - ",
+        "\u2013": "-",
+        "\u2014": "--",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+    }
+    normalized_value = value
+    for source, replacement in replacements.items():
+        normalized_value = normalized_value.replace(source, replacement)
+
+    ascii_value = (
+        unicodedata.normalize("NFKD", normalized_value).encode("ascii", "replace").decode("ascii")
+    )
+    return ascii_value
+
+
+def _database_uses_sql_ascii() -> bool:
+    if connection.vendor != "postgresql":
+        return False
+
+    raw_connection = connection.connection
+    if raw_connection is not None:
+        info = getattr(raw_connection, "info", None)
+        if info is not None:
+            encoding = getattr(info, "encoding", None)
+            if encoding:
+                return str(encoding).upper().replace("-", "_") == "SQL_ASCII"
+
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW server_encoding")
+        row = cursor.fetchone()
+    if not row:
+        return False
+    return str(row[0]).upper().replace("-", "_") == "SQL_ASCII"
 
 
 def _handle_github_issue_comment_event(

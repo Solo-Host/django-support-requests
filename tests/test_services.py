@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
@@ -11,6 +13,7 @@ from support_requests.models import (
     SupportProviderConfig,
     SupportRequest,
 )
+from support_requests.providers.base import SupportIssueResult
 from support_requests.services import (
     append_request_message,
     collect_request_attachment_options,
@@ -226,3 +229,74 @@ def test_list_request_thread_entries_does_not_duplicate_an_existing_opening_mess
         "Initial message",
         "Follow-up details",
     ]
+
+
+@override_settings(
+    SUPPORT_REQUESTS_PROVIDER_BACKENDS={
+        "dummy": "tests.helpers.DummySupportProvider",
+    }
+)
+def test_escalate_support_request_sanitizes_json_payloads_for_sql_ascii(
+    monkeypatch: Any,
+) -> None:
+    user = create_user(email="user@example.com")
+    staff_user = create_user(email="staff@example.com", is_staff=True)
+    support_request = SupportRequest.objects.create(
+        requester=user,
+        subject="Need help",
+        body="Initial message",
+    )
+    attachment = create_request_attachment(
+        request=support_request,
+        actor=user,
+        uploaded_file=SimpleUploadedFile(
+            "support—notes.png",
+            b"fake-image-bytes",
+            content_type="image/png",
+        ),
+        kind="screenshot",
+    )
+    provider = SupportProviderConfig.objects.create(
+        slug="dummy-provider",
+        name="Dummy provider",
+        backend_key="dummy",
+        api_token="secret",
+    )
+    destination = SupportDestination.objects.create(
+        provider=provider,
+        slug="dummy-destination",
+        name="Dummy destination",
+        remote_project="solo-host/demo",
+    )
+
+    monkeypatch.setattr("support_requests.services._database_uses_sql_ascii", lambda: True)
+
+    def fake_create_issue(*args: Any, **kwargs: Any) -> SupportIssueResult:
+        del args, kwargs
+        return SupportIssueResult(
+            remote_issue_id="9001",
+            remote_issue_number="101",
+            remote_issue_url="https://example.com/solo-host/demo/issues/101",
+            provider_response={
+                "body": (
+                    "## Visible conversation\n\n### user@example.com"
+                    " · 2026-07-29T00:00:00+00:00"
+                ),
+                "note": "Attachment — included",
+            },
+        )
+
+    monkeypatch.setattr("tests.helpers.DummySupportProvider.create_issue", fake_create_issue)
+
+    escalation = escalate_support_request(
+        request=support_request,
+        destination=destination,
+        actor=staff_user,
+        selected_attachment_keys=[f"package:{attachment.pk}"],
+    )
+
+    assert escalation.provider_response["body"].endswith(
+        "user@example.com  -  2026-07-29T00:00:00+00:00"
+    )
+    assert escalation.provider_response["note"] == "Attachment -- included"
+    assert escalation.forwarded_attachments[0]["display_name"] == "support--notes.png"

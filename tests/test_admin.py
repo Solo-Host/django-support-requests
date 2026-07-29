@@ -109,6 +109,27 @@ def test_support_request_admin_open_issue_view_creates_escalation(client: Any) -
     assert SupportEscalation.objects.filter(request=support_request).count() == 1
 
 
+def test_support_request_admin_open_issue_view_does_not_repeat_heading(client: Any) -> None:
+    staff_user = create_user(
+        email="staff@example.com",
+        is_staff=True,
+        is_superuser=True,
+    )
+    support_request = SupportRequest.objects.create(
+        requester=create_user(email="user@example.com"),
+        subject="Need help",
+        body="Initial message",
+    )
+    client.force_login(staff_user)
+
+    response = client.get(
+        reverse("admin:support_requests_supportrequest_open_issue", args=[support_request.pk]),
+    )
+
+    assert response.status_code == 200
+    assert '<div id="content-main">\n    <h1>' not in response.content.decode()
+
+
 def test_support_request_admin_open_issue_view_rejects_invalid_request(client: Any) -> None:
     staff_user = create_user(
         email="staff@example.com",
