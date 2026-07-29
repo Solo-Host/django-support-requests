@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-support-requests"
-version = "0.1.1"
+version = "0.1.2"
 description = "Reusable Django app for local support requests, attachments, and admin-managed issue escalation."
 readme = "README.md"
 license = "MIT"
