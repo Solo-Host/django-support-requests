@@ -6,6 +6,7 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 
+import support_requests.services as support_services
 from support_requests.models import (
     SupportDestination,
     SupportEscalation,
@@ -300,3 +301,41 @@ def test_escalate_support_request_sanitizes_json_payloads_for_sql_ascii(
     )
     assert escalation.provider_response["note"] == "Attachment -- included"
     assert escalation.forwarded_attachments[0]["display_name"] == "support--notes.png"
+
+
+def test_database_uses_sql_ascii_checks_server_encoding_not_client_encoding(
+    monkeypatch: Any,
+) -> None:
+    executed_queries: list[str] = []
+
+    class _FakeCursor:
+        def __enter__(self) -> _FakeCursor:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+            return None
+
+        def execute(self, sql: str) -> None:
+            executed_queries.append(sql)
+
+        def fetchone(self) -> tuple[str]:
+            return ("SQL_ASCII",)
+
+    class _FakeInfo:
+        encoding = "UTF8"
+
+    class _FakeRawConnection:
+        info = _FakeInfo()
+
+    class _FakeConnection:
+        vendor = "postgresql"
+        connection = _FakeRawConnection()
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+    monkeypatch.setattr(support_services, "connection", _FakeConnection())
+
+    assert support_services._database_uses_sql_ascii() is True
+    assert executed_queries == ["SHOW server_encoding"]

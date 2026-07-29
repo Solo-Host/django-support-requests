@@ -487,14 +487,6 @@ def _database_uses_sql_ascii() -> bool:
     if connection.vendor != "postgresql":
         return False
 
-    raw_connection = connection.connection
-    if raw_connection is not None:
-        info = getattr(raw_connection, "info", None)
-        if info is not None:
-            encoding = getattr(info, "encoding", None)
-            if encoding:
-                return str(encoding).upper().replace("-", "_") == "SQL_ASCII"
-
     with connection.cursor() as cursor:
         cursor.execute("SHOW server_encoding")
         row = cursor.fetchone()
