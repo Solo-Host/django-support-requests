@@ -10,7 +10,7 @@ admin-managed escalation to external issue platforms.
 - generic request attachments for screenshots, log bundles, and other files
 - pluggable outbound provider layer with GitHub included first
 - multiple configured providers and multiple configured remote destinations
-- Django admin workflow for reviewing a request and opening a remote issue
+- Django admin workflow for reviewing a request, replying locally, and opening a remote issue
 - GitHub App webhook sync for remote support replies and issue state changes
 - optional DRF URL set for request, message, and attachment APIs
 - host hook for exposing extra attachment sources during escalation
@@ -57,7 +57,7 @@ The package exposes a ticket-style API under the mounted prefix.
 | `GET` | `/tickets/` | List the authenticated user's support requests |
 | `POST` | `/tickets/` | Create a local support request |
 | `GET` | `/tickets/{id}/` | Retrieve one local support request |
-| `GET` | `/tickets/{id}/messages/` | List non-internal conversation messages |
+| `GET` | `/tickets/{id}/messages/` | List the non-internal conversation thread, including the opening request body |
 | `POST` | `/tickets/{id}/messages/` | Append a new user-visible message |
 | `GET` | `/tickets/{id}/attachments/` | List request attachments |
 | `POST` | `/tickets/{id}/attachments/` | Attach a file such as a screenshot or log bundle |
@@ -114,10 +114,12 @@ file=<updated-screenshot.png>
 ```
 
 The package keeps the support request local as the system of record. Remote
-platform issues are created later by staff from Django admin. Once a request has
-been escalated, new local user replies are forwarded to the remote issue, and
-GitHub App webhooks can sync remote support replies back into the local message
-thread.
+platform issues are created later by staff from Django admin. The opening
+request body is treated as the first end-user-visible message in the local
+thread, so both `GET /tickets/{id}/` and `GET /tickets/{id}/messages/` return a
+complete conversation view. Once a request has been escalated, new local user
+replies are forwarded to the remote issue, and GitHub App webhooks can sync
+remote support replies back into the local message thread.
 
 ## Configuration
 
@@ -177,17 +179,33 @@ In GitHub:
 3. Under **Repository permissions**, grant:
    - **Issues: Read and write**
    - **Metadata: Read-only**
-4. Generate a **webhook secret** for the app.
-5. Set the webhook URL to your mounted support requests webhook endpoint:
+4. In the GitHub App's **General** settings page — not in an individual
+   repository's **Settings → Webhooks** page — configure the app webhook:
+   - mark the webhook **Active**
+   - set the **Webhook URL** to your mounted support requests webhook endpoint
+   - set the **Webhook secret**
+   - leave **SSL verification** enabled unless you have a very specific local
+     development reason not to
 
    ```text
    https://<your-host>/api/v1/support/webhooks/github/
    ```
 
-6. Subscribe to:
-   - **Issue comments**
-   - **Issues**
-7. Generate a **private key** for the app and download the PEM file.
+   Repository-level webhooks are **not** the webhook mechanism used by this
+   package's GitHub App integration.
+
+5. In the GitHub App's **Permissions & events** settings page, grant the
+   repository permissions that allow the webhook events this package uses:
+   - **Issues: Read and write**
+   - **Metadata: Read-only**
+
+   On GitHub's current UI, you may not see a separate repo-style "subscribe"
+   screen on the webhook form itself. The important part is that this is still a
+   **GitHub App webhook**, and the `issues` / `issue_comment` deliveries are
+   governed by the app's permissions/events configuration rather than by a
+   repository-level webhook.
+
+6. Generate a **private key** for the app and download the PEM file.
 
 ### 2. Install the app on the target repositories
 
@@ -237,10 +255,16 @@ repos, create multiple destination rows.
 ### 5. Open the remote issue from Django admin
 
 1. Review the local support request in Django admin.
-2. Use **Open remote issue** on the request page.
-3. Choose the GitHub destination.
+2. Use **Reply to requester** to add a local support response, or **Open remote
+   issue** to escalate it externally.
+3. If you are escalating, choose the GitHub destination.
 4. Choose which attachments to forward.
 5. Submit the escalation.
+
+The standalone support-message admin workflow also uses the support-request
+lookup/search flow, so staff can find the correct ticket by ticket ID,
+requester email, subject, or description instead of relying on the subject line
+alone.
 
 For GitHub, attachments are forwarded as links in the issue body because the
 official GitHub issue API does not accept direct binary uploads.
@@ -254,6 +278,10 @@ With the GitHub App webhook configured:
 - `issues.closed` marks the local request as resolved
 - `issues.reopened` reopens the local request
 - new local user replies are posted back to the linked GitHub issue as comments
+
+Those synced remote support replies are stored as **non-internal** support
+messages, so they are returned by `GET /tickets/{id}/messages/` as part of the
+same end-user-visible thread that starts with the opening request body.
 
 ### Optional fallback: personal access token
 

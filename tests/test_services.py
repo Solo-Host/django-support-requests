@@ -16,6 +16,7 @@ from support_requests.services import (
     collect_request_attachment_options,
     create_request_attachment,
     escalate_support_request,
+    list_request_thread_entries,
 )
 from tests.helpers import create_user
 
@@ -197,3 +198,31 @@ def test_append_request_message_forwards_user_reply_to_open_escalation() -> None
 
     assert message.author_role == SupportMessage.AuthorRole.USER
     assert message.external_message_id.startswith("comment-")
+
+
+def test_list_request_thread_entries_does_not_duplicate_an_existing_opening_message() -> None:
+    user = create_user(email="user@example.com")
+    support_request = SupportRequest.objects.create(
+        requester=user,
+        subject="Need help",
+        body="Initial message",
+    )
+    SupportMessage.objects.create(
+        request=support_request,
+        author=user,
+        author_role=SupportMessage.AuthorRole.USER,
+        body="Initial message",
+    )
+    SupportMessage.objects.create(
+        request=support_request,
+        author=user,
+        author_role=SupportMessage.AuthorRole.USER,
+        body="Follow-up details",
+    )
+
+    thread_entries = list_request_thread_entries(request=support_request)
+
+    assert [entry.body for entry in thread_entries] == [
+        "Initial message",
+        "Follow-up details",
+    ]

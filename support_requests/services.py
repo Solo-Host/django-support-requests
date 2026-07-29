@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from django.core.files.uploadedfile import UploadedFile
@@ -28,6 +30,19 @@ from support_requests.providers.base import (
     BaseSupportProvider,
     SupportAttachmentLink,
 )
+
+OPENING_MESSAGE_DEDUP_WINDOW = timedelta(seconds=5)
+
+
+@dataclass(frozen=True, slots=True)
+class SupportRequestThreadEntry:
+    id: str
+    ticket_id: str
+    created_at: datetime
+    author_id: str | None
+    author_role: str
+    body: str
+    is_internal: bool = False
 
 
 def validate_request_attachment(uploaded_file: UploadedFile) -> UploadedFile:
@@ -118,6 +133,33 @@ def list_visible_messages(*, request: SupportRequest) -> Iterable[SupportMessage
         "Iterable[SupportMessage]",
         request.messages.filter(is_internal=False).select_related("author"),
     )
+
+
+def list_request_thread_entries(
+    *,
+    request: SupportRequest,
+    include_internal: bool = False,
+) -> list[SupportRequestThreadEntry]:
+    messages = list(request.messages.all())
+    if not include_internal:
+        messages = [message for message in messages if not message.is_internal]
+
+    thread_entries: list[SupportRequestThreadEntry] = []
+    if _request_needs_opening_message_entry(request=request, messages=messages):
+        thread_entries.append(
+            SupportRequestThreadEntry(
+                id=f"opening-{request.pk}",
+                ticket_id=str(request.pk),
+                created_at=request.created_at,
+                author_id=str(request.requester_id) if request.requester_id else None,
+                author_role=SupportMessage.AuthorRole.USER,
+                body=request.body,
+                is_internal=False,
+            )
+        )
+
+    thread_entries.extend(_thread_entry_from_message(message) for message in messages)
+    return thread_entries
 
 
 def collect_request_attachment_options(request: SupportRequest) -> list[SupportAttachmentLink]:
@@ -360,6 +402,41 @@ def _forward_request_message_to_remote_issue(message: SupportMessage) -> None:
 
     message.external_message_id = result.remote_comment_id
     message.save(update_fields=["external_message_id", "updated_at"])
+
+
+def _thread_entry_from_message(message: SupportMessage) -> SupportRequestThreadEntry:
+    return SupportRequestThreadEntry(
+        id=str(message.pk),
+        ticket_id=str(message.request_id),
+        created_at=message.created_at,
+        author_id=str(message.author_id) if message.author_id is not None else None,
+        author_role=message.author_role,
+        body=message.body,
+        is_internal=message.is_internal,
+    )
+
+
+def _request_needs_opening_message_entry(
+    *,
+    request: SupportRequest,
+    messages: list[SupportMessage],
+) -> bool:
+    opening_body = str(request.body or "").strip()
+    if not opening_body:
+        return False
+
+    for message in messages:
+        if message.is_internal or message.author_role != SupportMessage.AuthorRole.USER:
+            continue
+        if str(message.body or "").strip() != opening_body:
+            continue
+        if (
+            abs((message.created_at - request.created_at).total_seconds())
+            <= OPENING_MESSAGE_DEDUP_WINDOW.total_seconds()
+        ):
+            return False
+
+    return True
 
 
 def _handle_github_issue_comment_event(

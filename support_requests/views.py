@@ -19,13 +19,14 @@ from support_requests.serializers import (
     SupportRequestAttachmentUploadSerializer,
     SupportRequestMessageCreateSerializer,
     SupportRequestSerializer,
+    SupportRequestThreadEntrySerializer,
 )
 from support_requests.services import (
     create_request_attachment,
     github_provider_for_webhook,
     github_webhook_signature_is_valid,
     handle_github_webhook,
-    list_visible_messages,
+    list_request_thread_entries,
 )
 
 
@@ -46,9 +47,8 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
     def messages(self, request: Request, pk: str | None = None) -> Response:
         support_request = self.get_object()
         if request.method == "GET":
-            visible_messages = list(list_visible_messages(request=support_request))
-            serializer = SupportMessageSerializer(
-                visible_messages,
+            serializer = SupportRequestThreadEntrySerializer(
+                list_request_thread_entries(request=support_request),
                 many=True,
             )
             return Response(serializer.data)

@@ -54,7 +54,27 @@ def test_request_add_message(api_client: APIClient) -> None:
 
 
 @pytest.mark.django_db
-def test_request_messages_hide_internal_notes(api_client: APIClient) -> None:
+def test_request_detail_includes_opening_message_in_thread(api_client: APIClient) -> None:
+    user = create_user(email="user@example.com")
+    support_request = SupportRequest.objects.create(
+        requester=user,
+        subject="Need help",
+        body="Initial message",
+    )
+    api_client.force_authenticate(user=user)
+
+    response = api_client.get(f"/api/support/tickets/{support_request.id}/")
+
+    assert response.status_code == 200, response.content
+    assert response.json()["messages"][0]["id"] == f"opening-{support_request.id}"
+    assert response.json()["messages"][0]["body"] == support_request.body
+    assert response.json()["messages"][0]["author_role"] == SupportMessage.AuthorRole.USER
+
+
+@pytest.mark.django_db
+def test_request_messages_include_opening_message_and_hide_internal_notes(
+    api_client: APIClient,
+) -> None:
     user = create_user(email="user@example.com")
     staff_user = create_user(email="staff@example.com", is_staff=True)
     support_request = SupportRequest.objects.create(
@@ -73,6 +93,13 @@ def test_request_messages_hide_internal_notes(api_client: APIClient) -> None:
         request=support_request,
         author=staff_user,
         author_role=SupportMessage.AuthorRole.SUPPORT,
+        body="Support reply",
+        is_internal=False,
+    )
+    SupportMessage.objects.create(
+        request=support_request,
+        author=staff_user,
+        author_role=SupportMessage.AuthorRole.SUPPORT,
         body="Internal note",
         is_internal=True,
     )
@@ -81,7 +108,11 @@ def test_request_messages_hide_internal_notes(api_client: APIClient) -> None:
     response = api_client.get(f"/api/support/tickets/{support_request.id}/messages/")
 
     assert response.status_code == 200, response.content
-    assert [message["body"] for message in response.json()] == ["User-visible update"]
+    assert [message["body"] for message in response.json()] == [
+        support_request.body,
+        "User-visible update",
+        "Support reply",
+    ]
 
 
 @pytest.mark.django_db

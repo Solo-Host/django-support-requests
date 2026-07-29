@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from django import forms
 from django.contrib import admin, messages
@@ -19,6 +20,7 @@ from support_requests.models import (
     SupportRequestAttachment,
 )
 from support_requests.services import (
+    append_request_message,
     collect_request_attachment_options,
     escalate_support_request,
     request_can_be_escalated,
@@ -164,7 +166,8 @@ class SupportRequestAdmin(admin.ModelAdmin):
         "last_escalated_at",
     )
     list_filter = ("status", "priority", "category")
-    search_fields = ("subject", "body", "requester__email")
+    search_fields = ("id", "subject", "body", "requester__email")
+    search_help_text = "Search by ticket ID, requester email, subject, or description."
     readonly_fields = (
         "id",
         "created_at",
@@ -174,6 +177,7 @@ class SupportRequestAdmin(admin.ModelAdmin):
         "last_staff_activity_at",
         "last_escalated_at",
         "open_issue_link",
+        "reply_to_requester_link",
     )
     inlines = (SupportRequestAttachmentInline, SupportEscalationInline)
 
@@ -192,6 +196,17 @@ class SupportRequestAdmin(admin.ModelAdmin):
         url = reverse("admin:support_requests_supportrequest_open_issue", args=[obj.pk])
         return format_html('<a class="button" href="{}">Open remote issue</a>', url)
 
+    @admin.display(description="Reply")
+    def reply_to_requester_link(self, obj: SupportRequest) -> str:
+        query = urlencode(
+            {
+                "request": str(obj.pk),
+                "_request": str(obj.pk),
+            }
+        )
+        url = f"{reverse('admin:support_requests_supportmessage_add')}?{query}"
+        return format_html('<a class="button" href="{}">Reply to requester</a>', url)
+
     def get_readonly_fields(
         self,
         request: HttpRequest,
@@ -199,7 +214,8 @@ class SupportRequestAdmin(admin.ModelAdmin):
     ) -> tuple[str, ...]:
         readonly_fields = tuple(super().get_readonly_fields(request, obj))
         if obj is None:
-            return tuple(field for field in readonly_fields if field != "open_issue_link")
+            hidden_fields = {"open_issue_link", "reply_to_requester_link"}
+            return tuple(field for field in readonly_fields if field not in hidden_fields)
         return readonly_fields
 
     def get_urls(self) -> list[Any]:
@@ -282,8 +298,105 @@ class SupportRequestAdmin(admin.ModelAdmin):
 class SupportMessageAdmin(admin.ModelAdmin):
     list_display = ("request", "author", "author_role", "is_internal", "created_at")
     list_filter = ("author_role", "is_internal")
-    search_fields = ("body", "request__subject", "author__email")
-    readonly_fields = ("id", "created_at", "updated_at")
+    search_fields = (
+        "body",
+        "request__id",
+        "request__subject",
+        "request__requester__email",
+        "author__email",
+        "external_message_id",
+    )
+    search_help_text = "Search by ticket ID, requester email, subject, or message text."
+    raw_id_fields = ("request",)
+    readonly_fields = (
+        "id",
+        "request_link",
+        "author",
+        "author_role",
+        "external_message_id",
+        "body",
+        "is_internal",
+        "created_at",
+        "updated_at",
+    )
+
+    @admin.display(description="Request")
+    def request_link(self, obj: SupportMessage) -> str:
+        url = reverse("admin:support_requests_supportrequest_change", args=[obj.request_id])
+        return format_html('<a href="{}">{}</a>', url, obj.request)
+
+    def get_fields(
+        self,
+        request: HttpRequest,
+        obj: SupportMessage | None = None,
+    ) -> tuple[str, ...]:
+        if obj is None:
+            return ("request", "body", "is_internal")
+        return (
+            "request_link",
+            "author",
+            "author_role",
+            "external_message_id",
+            "body",
+            "is_internal",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_readonly_fields(
+        self,
+        request: HttpRequest,
+        obj: SupportMessage | None = None,
+    ) -> tuple[str, ...]:
+        if obj is None:
+            return ()
+        return tuple(super().get_readonly_fields(request, obj))
+
+    def save_model(
+        self,
+        request: HttpRequest,
+        obj: SupportMessage,
+        form: forms.ModelForm[Any],
+        change: bool,
+    ) -> None:
+        if change:
+            super().save_model(request, obj, form, change)
+            return
+
+        support_request = cast(SupportRequest, form.cleaned_data["request"])
+        body = cast(str, form.cleaned_data["body"])
+        is_internal = bool(form.cleaned_data["is_internal"])
+        message = append_request_message(
+            request=support_request,
+            actor=request.user,
+            body=body,
+            is_internal=is_internal,
+            author_role=SupportMessage.AuthorRole.SUPPORT,
+            propagate_to_remote=False,
+        )
+        obj.pk = message.pk
+        obj.request = message.request
+        obj.author = message.author
+        obj.author_role = message.author_role
+        obj.external_message_id = message.external_message_id
+        obj.body = message.body
+        obj.is_internal = message.is_internal
+        obj.created_at = message.created_at
+        obj.updated_at = message.updated_at
+
+    def response_add(
+        self,
+        request: HttpRequest,
+        obj: SupportMessage,
+        post_url_continue: str | None = None,
+    ) -> HttpResponse:
+        response = super().response_add(request, obj, post_url_continue)
+        request_id = request.GET.get("_request")
+        if request_id:
+            return HttpResponseRedirect(
+                reverse("admin:support_requests_supportrequest_change", args=[request_id])
+            )
+        return response
 
 
 @admin.register(SupportRequestAttachment)
@@ -298,7 +411,13 @@ class SupportRequestAttachmentAdmin(admin.ModelAdmin):
         "created_at",
     )
     list_filter = ("kind",)
-    search_fields = ("request__subject", "uploaded_by__email", "original_filename")
+    search_fields = (
+        "request__id",
+        "request__subject",
+        "request__requester__email",
+        "uploaded_by__email",
+        "original_filename",
+    )
     readonly_fields = ("id", "request_link", "file_link", "created_at", "updated_at")
 
     @admin.display(description="Request")
@@ -384,7 +503,9 @@ class SupportEscalationAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "destination")
     search_fields = (
+        "request__id",
         "request__subject",
+        "request__requester__email",
         "destination__name",
         "remote_issue_number",
         "remote_issue_url",

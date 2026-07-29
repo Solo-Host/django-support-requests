@@ -6,7 +6,11 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from support_requests.models import SupportMessage, SupportRequest, SupportRequestAttachment
-from support_requests.services import append_request_message, create_request_attachment
+from support_requests.services import (
+    append_request_message,
+    create_request_attachment,
+    list_request_thread_entries,
+)
 
 
 class SupportMessageSerializer(serializers.ModelSerializer[SupportMessage]):
@@ -31,6 +35,16 @@ class SupportMessageSerializer(serializers.ModelSerializer[SupportMessage]):
             "author_role",
             "is_internal",
         )
+
+
+class SupportRequestThreadEntrySerializer(serializers.Serializer):
+    id = serializers.CharField()
+    ticket = serializers.CharField(source="ticket_id")
+    created_at = serializers.DateTimeField()
+    author = serializers.CharField(source="author_id", allow_null=True)
+    author_role = serializers.CharField()
+    body = serializers.CharField()
+    is_internal = serializers.BooleanField()
 
 
 class SupportRequestAttachmentSerializer(serializers.ModelSerializer[SupportRequestAttachment]):
@@ -61,7 +75,7 @@ class SupportRequestAttachmentUploadSerializer(serializers.Serializer):
 
 
 class SupportRequestSerializer(serializers.ModelSerializer[SupportRequest]):
-    messages = SupportMessageSerializer(many=True, read_only=True)
+    messages = serializers.SerializerMethodField()
     attachments = SupportRequestAttachmentSerializer(many=True, read_only=True)
     attachment_files = serializers.ListField(
         child=serializers.FileField(),
@@ -99,6 +113,13 @@ class SupportRequestSerializer(serializers.ModelSerializer[SupportRequest]):
             "created_at",
             "updated_at",
         )
+
+    def get_messages(self, obj: SupportRequest) -> list[dict[str, Any]]:
+        serializer = SupportRequestThreadEntrySerializer(
+            list_request_thread_entries(request=obj),
+            many=True,
+        )
+        return cast(list[dict[str, Any]], serializer.data)
 
     def create(self, validated_data: dict[str, Any]) -> SupportRequest:
         attachment_files = cast(list[Any], validated_data.pop("attachment_files", []))
