@@ -167,3 +167,73 @@ def test_request_attachment_upload_action(api_client: APIClient) -> None:
     assert response.status_code == 201, response.content
     assert SupportRequestAttachment.objects.filter(request=support_request).count() == 1
     assert response.json()["kind"] == "screenshot"
+
+
+@pytest.mark.django_db
+def test_request_close_and_reopen(api_client: APIClient) -> None:
+    user = create_user(email="closer@example.com")
+    support_request = SupportRequest.objects.create(
+        requester=user,
+        subject="Please close",
+        body="All done",
+    )
+    api_client.force_authenticate(user=user)
+
+    close_response = api_client.post(
+        f"/api/support/tickets/{support_request.id}/close/",
+    )
+    assert close_response.status_code == 200, close_response.content
+    assert close_response.json()["status"] == SupportRequest.Status.CLOSED
+    support_request.refresh_from_db()
+    assert support_request.status == SupportRequest.Status.CLOSED
+    assert support_request.resolved_at is not None
+
+    reopen_response = api_client.post(
+        f"/api/support/tickets/{support_request.id}/reopen/",
+    )
+    assert reopen_response.status_code == 200, reopen_response.content
+    assert reopen_response.json()["status"] == SupportRequest.Status.OPEN
+    support_request.refresh_from_db()
+    assert support_request.status == SupportRequest.Status.OPEN
+    assert support_request.resolved_at is None
+
+
+@pytest.mark.django_db
+def test_closed_request_rejects_new_message(api_client: APIClient) -> None:
+    user = create_user(email="readonly@example.com")
+    support_request = SupportRequest.objects.create(
+        requester=user,
+        subject="Closed ticket",
+        body="Initial",
+        status=SupportRequest.Status.CLOSED,
+    )
+    api_client.force_authenticate(user=user)
+
+    response = api_client.post(
+        f"/api/support/tickets/{support_request.id}/messages/",
+        {"body": "Can I still reply?"},
+        format="json",
+    )
+    assert response.status_code == 400, response.content
+    assert SupportMessage.objects.filter(request=support_request).count() == 0
+
+
+@pytest.mark.django_db
+def test_closed_request_rejects_new_attachment(api_client: APIClient) -> None:
+    user = create_user(email="readonly-attach@example.com")
+    support_request = SupportRequest.objects.create(
+        requester=user,
+        subject="Closed ticket",
+        body="Initial",
+        status=SupportRequest.Status.CLOSED,
+    )
+    api_client.force_authenticate(user=user)
+
+    upload = SimpleUploadedFile("shot.png", b"\x89PNG\r\n\x1a\n", content_type="image/png")
+    response = api_client.post(
+        f"/api/support/tickets/{support_request.id}/attachments/",
+        {"file": upload, "kind": SupportRequestAttachment.Kind.SCREENSHOT},
+        format="multipart",
+    )
+    assert response.status_code == 400, response.content
+    assert SupportRequestAttachment.objects.filter(request=support_request).count() == 0
