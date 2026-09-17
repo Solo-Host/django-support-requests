@@ -22,11 +22,14 @@ from support_requests.serializers import (
     SupportRequestThreadEntrySerializer,
 )
 from support_requests.services import (
+    close_request,
     create_request_attachment,
+    ensure_request_open_for_updates,
     github_provider_for_webhook,
     github_webhook_signature_is_valid,
     handle_github_webhook,
     list_request_thread_entries,
+    reopen_request,
 )
 
 
@@ -55,6 +58,7 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 
         message_create_serializer = SupportRequestMessageCreateSerializer(data=request.data)
         message_create_serializer.is_valid(raise_exception=True)
+        ensure_request_open_for_updates(support_request)
         message = message_create_serializer.create_for_request(
             request=support_request,
             actor=cast(Any, request.user),
@@ -76,6 +80,7 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 
         attachment_upload_serializer = SupportRequestAttachmentUploadSerializer(data=request.data)
         attachment_upload_serializer.is_valid(raise_exception=True)
+        ensure_request_open_for_updates(support_request)
         attachment = create_request_attachment(
             request=support_request,
             actor=cast(Any, request.user),
@@ -86,6 +91,18 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
             SupportRequestAttachmentSerializer(attachment).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=["post"], url_path="close")
+    def close(self, request: Request, pk: str | None = None) -> Response:
+        support_request = self.get_object()
+        close_request(request=support_request, actor=cast(Any, request.user))
+        return Response(self.get_serializer(support_request).data)
+
+    @action(detail=True, methods=["post"], url_path="reopen")
+    def reopen(self, request: Request, pk: str | None = None) -> Response:
+        support_request = self.get_object()
+        reopen_request(request=support_request, actor=cast(Any, request.user))
+        return Response(self.get_serializer(support_request).data)
 
 
 class GitHubWebhookView(APIView):

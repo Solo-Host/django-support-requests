@@ -83,6 +83,55 @@ def create_request_attachment(
     )
 
 
+def ensure_request_open_for_updates(request: SupportRequest) -> None:
+    """Reject new messages/attachments while a request is closed."""
+    if request.status == SupportRequest.Status.CLOSED:
+        raise serializers.ValidationError(
+            "This ticket is closed. Reopen it to add messages or attachments."
+        )
+
+
+def close_request(*, request: SupportRequest, actor: Any) -> SupportRequest:
+    """Transition a support request to the closed state."""
+    return _set_request_status(
+        request=request,
+        actor=actor,
+        new_status=SupportRequest.Status.CLOSED,
+    )
+
+
+def reopen_request(*, request: SupportRequest, actor: Any) -> SupportRequest:
+    """Reopen a previously closed/resolved support request."""
+    return _set_request_status(
+        request=request,
+        actor=actor,
+        new_status=SupportRequest.Status.OPEN,
+    )
+
+
+def _set_request_status(
+    *, request: SupportRequest, actor: Any, new_status: str
+) -> SupportRequest:
+    now = timezone.now()
+    request.status = new_status
+    update_fields = ["status", "resolved_at", "updated_at"]
+    if new_status == SupportRequest.Status.CLOSED:
+        if request.resolved_at is None:
+            request.resolved_at = now
+    else:
+        request.resolved_at = None
+
+    author_role = _author_role_for_actor(actor)
+    if author_role == SupportMessage.AuthorRole.USER:
+        request.last_requester_activity_at = now
+        update_fields.append("last_requester_activity_at")
+    else:
+        request.last_staff_activity_at = now
+        update_fields.append("last_staff_activity_at")
+    request.save(update_fields=update_fields)
+    return request
+
+
 def request_escalation_errors(request: SupportRequest) -> list[str]:
     errors: list[str] = []
     if request.pk is None:
