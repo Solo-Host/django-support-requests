@@ -261,7 +261,7 @@ class SupportRequestAdmin(admin.ModelAdmin):
                 detail = exc.detail
                 if isinstance(detail, dict):
                     for field_name, field_errors in detail.items():
-                        field = None if field_name == "non_field_errors" else field_name
+                        field = None if field_name == "non_field_errors" else str(field_name)
                         for error in _error_strings(field_errors):
                             form.add_error(field, str(error))
                 elif isinstance(detail, list):
